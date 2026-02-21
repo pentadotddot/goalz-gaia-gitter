@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
@@ -124,14 +124,34 @@ async def check_repo(repo: str) -> CheckRepoResponse:
 
 
 # ---------------------------------------------------------------------------
-# POST /api/push-code – direct API trigger
+# POST /api/push-code – direct API trigger / ClickUp automation webhook
 # ---------------------------------------------------------------------------
 @app.post("/api/push-code", response_model=PushCodeResponse)
-async def push_code(body: PushCodeRequest) -> PushCodeResponse:
-    # Path A: caller provides a task_id → fetch everything from ClickUp
-    if body.task_id:
+async def push_code(
+    request: Request,
+    task_id: str | None = Query(None, description="ClickUp task ID (from URL query param)"),
+) -> PushCodeResponse:
+    # Try to parse the body as our PushCodeRequest; if it fails (e.g.
+    # ClickUp automation sends its own payload), just use an empty one.
+    body: PushCodeRequest | None = None
+    try:
+        raw = await request.body()
+        if raw and raw.strip():
+            body = PushCodeRequest.model_validate_json(raw)
+    except Exception:
+        logger.info("Could not parse request body as PushCodeRequest – using query params only")
+        body = None
+
+    if body is None:
+        body = PushCodeRequest()
+
+    # Query-param task_id takes priority over body task_id
+    effective_task_id = task_id or body.task_id
+
+    # Path A: task_id provided → fetch everything from ClickUp
+    if effective_task_id:
         return await _process_task(
-            task_id=body.task_id,
+            task_id=effective_task_id,
             override_repo=body.github_repo,
             override_branch=body.github_branch,
             override_base_branch=body.base_branch,

@@ -34,8 +34,8 @@ class ClickUpClient:
     """Thin async wrapper around the ClickUp v2 REST API."""
 
     def __init__(self, settings: Settings) -> None:
-        self._token = settings.clickup_api_token
-        self._webhook_secret = settings.clickup_webhook_secret
+        self._token = settings.clickup_api_token.strip()
+        self._webhook_secret = settings.clickup_webhook_secret.strip()
         self._headers = {
             "Authorization": self._token,
             "Content-Type": "application/json",
