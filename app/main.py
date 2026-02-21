@@ -16,7 +16,7 @@ from app.models import (
 )
 from app.services.clickup import ClickUpClient
 from app.services.github import GitHubService
-from app.services.parser import parse_code_blocks
+from app.services.parser import parse_code_blocks, parse_json_payload
 
 from pydantic import BaseModel
 
@@ -196,26 +196,44 @@ async def _process_task(
     override_create_pr: bool = False,
     override_pr_target: str | None = None,
 ) -> PushCodeResponse:
-    """Fetch a ClickUp task, parse its code blocks, and push to GitHub."""
+    """Fetch a ClickUp task, parse its description, and push to GitHub."""
     clickup = _get_clickup()
     settings = get_settings()
 
     task = await clickup.get_task(task_id)
 
-    repo = override_repo or task.github_repo
-    branch = override_branch or task.github_branch
-    files = override_files or parse_code_blocks(task.description)
-    create_pr = override_create_pr or task.create_pr
-    pr_target = override_pr_target or task.pr_target_branch
+    # --- Try JSON payload in description first (preferred) ---------------
+    json_payload = parse_json_payload(task.description)
+
+    if json_payload:
+        logger.info("Found JSON payload in task %s description", task_id)
+        # JSON payload values, with overrides and custom fields as fallbacks
+        repo = override_repo or json_payload.get("github_repo") or task.github_repo
+        branch = override_branch or json_payload.get("github_branch") or task.github_branch
+        base_branch = override_base_branch or json_payload.get("base_branch")
+        files = override_files or json_payload.get("files")
+        create_pr = override_create_pr or json_payload.get("create_pr", False) or task.create_pr
+        pr_target = override_pr_target or json_payload.get("pr_target_branch") or task.pr_target_branch
+        commit_msg_from_json = json_payload.get("commit_message")
+    else:
+        # --- Legacy: markdown code blocks + custom fields ----------------
+        logger.info("No JSON payload in task %s – falling back to markdown parser", task_id)
+        repo = override_repo or task.github_repo
+        branch = override_branch or task.github_branch
+        base_branch = override_base_branch
+        files = override_files or parse_code_blocks(task.description)
+        create_pr = override_create_pr or task.create_pr
+        pr_target = override_pr_target or task.pr_target_branch
+        commit_msg_from_json = None
 
     if not repo:
-        raise HTTPException(status_code=400, detail="github_repo not set on task or request")
+        raise HTTPException(status_code=400, detail="github_repo not set in JSON payload, custom fields, or request")
     if not branch:
-        raise HTTPException(status_code=400, detail="github_branch not set on task or request")
+        raise HTTPException(status_code=400, detail="github_branch not set in JSON payload, custom fields, or request")
     if not files:
-        raise HTTPException(status_code=400, detail="No code blocks found in task description")
+        raise HTTPException(status_code=400, detail="No files found in task description (JSON or markdown)")
 
-    commit_message = override_commit_msg or settings.commit_message_template.format(
+    commit_message = override_commit_msg or commit_msg_from_json or settings.commit_message_template.format(
         task_id=task.task_id,
         task_name=task.task_name,
     )
@@ -223,7 +241,7 @@ async def _process_task(
     result = _commit_and_maybe_pr(
         repo=repo,
         branch=branch,
-        base_branch=override_base_branch,
+        base_branch=base_branch,
         files=files,
         commit_message=commit_message,
         create_pr=create_pr,
