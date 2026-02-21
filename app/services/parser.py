@@ -36,29 +36,59 @@ _JSON_BLOCK_RE = re.compile(
 #    correctly without a complex regex.
 
 
-def _try_json_loads(text: str) -> dict[str, Any] | None:
-    """Try ``json.loads`` on *text*.
+def _fix_content_quotes(text: str) -> str:
+    """Re-escape bare ``"`` inside ``"content": "..."`` values.
 
-    If it fails, halve backslashes (ClickUp's markdown description doubles
-    them) and retry.  Returns the parsed dict or ``None``.
+    ClickUp's markdown renderer strips the ``\\`` from ``\\\"`` inside code
+    blocks, turning valid JSON escapes into bare quotes that break
+    ``json.loads``.  Because the formatted JSON has each content value on
+    a **single line**, we can safely identify and repair them.
     """
-    # Attempt 1: as-is
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict):
-            return data
-    except (json.JSONDecodeError, ValueError):
-        pass
+    _CONTENT_LINE_RE = re.compile(
+        r'^(\s*"content"\s*:\s*")'   # prefix: key + opening quote
+        r'(.*)'                      # body (greedy)
+        r'("\s*,?\s*)$',             # closing quote + optional comma
+        re.MULTILINE,
+    )
 
-    # Attempt 2: undo ClickUp's backslash doubling
-    fixed = text.replace("\\\\", "\\")
-    try:
-        data = json.loads(fixed)
-        if isinstance(data, dict):
-            logger.info("JSON parsed after halving backslashes (ClickUp markdown escaping)")
-            return data
-    except (json.JSONDecodeError, ValueError):
-        pass
+    def _escape_body(m: re.Match) -> str:
+        prefix = m.group(1)
+        body = m.group(2)
+        suffix = m.group(3)
+        # Escape any " that isn't already preceded by a backslash
+        fixed = re.sub(r'(?<!\\)"', '\\"', body)
+        return prefix + fixed + suffix
+
+    return _CONTENT_LINE_RE.sub(_escape_body, text)
+
+
+def _try_json_loads(text: str) -> dict[str, Any] | None:
+    """Try ``json.loads`` on *text* with increasingly aggressive fixes.
+
+    ClickUp's markdown description:
+    1. May double backslashes (``\\\\n`` instead of ``\\n``).
+    2. May strip quote escaping, turning escaped quotes into bare ones
+       (e.g. triple-quoted ABAP comments become unescaped).
+
+    We attempt parsing in order of least to most transformation.
+    Returns the parsed dict or ``None``.
+    """
+    candidates: list[str] = [
+        text,                                      # 1. as-is
+        text.replace("\\\\", "\\"),                 # 2. halve backslashes
+        _fix_content_quotes(text),                 # 3. re-escape content quotes
+        _fix_content_quotes(text.replace("\\\\", "\\")),  # 4. both fixes
+    ]
+
+    for i, candidate in enumerate(candidates):
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, dict):
+                if i > 0:
+                    logger.info("JSON parsed on attempt %d (with ClickUp escaping fixes)", i + 1)
+                return data
+        except (json.JSONDecodeError, ValueError):
+            continue
 
     return None
 
@@ -82,8 +112,8 @@ def _normalize_files(files: Any) -> dict[str, str] | None:
     """Accept *files* as either a dict or an array-of-objects and return a dict.
 
     Supported formats:
-    - ``{"path": "content", ...}``  (dict – original format)
-    - ``[{"path": "...", "content": "..."}, ...]``  (array – superagent format)
+    - ``{"path": "content", ...}``  (dict - original format)
+    - ``[{"path": "...", "content": "..."}, ...]``  (array - superagent format)
 
     Returns ``None`` if the format is unrecognised.
     """
