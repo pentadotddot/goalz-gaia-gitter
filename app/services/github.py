@@ -21,6 +21,7 @@ class CommitResult:
     sha: str
     url: str
     pr_url: str | None = None
+    branch_created: bool = False
 
 
 class GitHubService:
@@ -31,7 +32,54 @@ class GitHubService:
         self._gh = Github(auth=auth)
 
     # ------------------------------------------------------------------
-    # Core: commit a set of files onto an existing branch
+    # Verify token has access to a repo
+    # ------------------------------------------------------------------
+    def check_repo_access(self, repo_full_name: str) -> dict:
+        """Return basic repo info to verify the token has access."""
+        repo = self._gh.get_repo(repo_full_name)
+        return {
+            "full_name": repo.full_name,
+            "default_branch": repo.default_branch,
+            "private": repo.private,
+            "permissions": {
+                "admin": repo.permissions.admin if repo.permissions else False,
+                "push": repo.permissions.push if repo.permissions else False,
+                "pull": repo.permissions.pull if repo.permissions else False,
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # Ensure a branch exists (create from base if not)
+    # ------------------------------------------------------------------
+    def ensure_branch(
+        self, repo_full_name: str, branch: str, base_branch: str | None = None
+    ) -> bool:
+        """Make sure *branch* exists. Create it from *base_branch* if not.
+
+        Returns True if a new branch was created, False if it already existed.
+        """
+        repo = self._gh.get_repo(repo_full_name)
+        try:
+            repo.get_git_ref(f"heads/{branch}")
+            return False  # already exists
+        except GithubException as exc:
+            if exc.status != 404:
+                raise
+
+        # Branch does not exist – create from base
+        source = base_branch or repo.default_branch
+        base_ref = repo.get_git_ref(f"heads/{source}")
+        repo.create_git_ref(
+            ref=f"refs/heads/{branch}",
+            sha=base_ref.object.sha,
+        )
+        logger.info(
+            "Created branch %s from %s on %s", branch, source, repo_full_name
+        )
+        return True
+
+    # ------------------------------------------------------------------
+    # Core: commit a set of files onto a branch
     # ------------------------------------------------------------------
     def commit_files(
         self,
@@ -39,6 +87,7 @@ class GitHubService:
         branch: str,
         files: dict[str, str],
         commit_message: str,
+        base_branch: str | None = None,
     ) -> CommitResult:
         """Create a single commit that writes *files* to *branch*.
 
@@ -47,16 +96,24 @@ class GitHubService:
         repo_full_name:
             ``"owner/repo"`` identifier.
         branch:
-            Target branch name (must already exist).
+            Target branch name. If it doesn't exist it will be created
+            from *base_branch* (or the repo default branch).
         files:
             ``{file_path: file_content}`` mapping.
         commit_message:
             Commit message string.
+        base_branch:
+            Branch to fork from when *branch* doesn't exist yet.
+            Defaults to the repo's default branch (usually ``main``).
 
         Returns
         -------
-        CommitResult with the new commit SHA and URL.
+        CommitResult with the new commit SHA, URL, and whether the branch
+        was freshly created.
         """
+        # Auto-create branch if needed
+        branch_created = self.ensure_branch(repo_full_name, branch, base_branch)
+
         repo = self._gh.get_repo(repo_full_name)
 
         # 1. Get the SHA of the latest commit on the branch
@@ -93,7 +150,9 @@ class GitHubService:
         commit_url = f"https://github.com/{repo_full_name}/commit/{new_commit.sha}"
         logger.info("Committed %s to %s/%s", new_commit.sha[:8], repo_full_name, branch)
 
-        return CommitResult(sha=new_commit.sha, url=commit_url)
+        return CommitResult(
+            sha=new_commit.sha, url=commit_url, branch_created=branch_created
+        )
 
     # ------------------------------------------------------------------
     # Optional: create a pull request

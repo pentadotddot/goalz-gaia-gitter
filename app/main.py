@@ -18,6 +18,8 @@ from app.services.clickup import ClickUpClient
 from app.services.github import GitHubService
 from app.services.parser import parse_code_blocks
 
+from pydantic import BaseModel
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,30 @@ async def webhook_clickup(
 
 
 # ---------------------------------------------------------------------------
+# GET /api/check-repo – verify token access to a repo
+# ---------------------------------------------------------------------------
+class CheckRepoResponse(BaseModel):
+    full_name: str
+    default_branch: str
+    private: bool
+    permissions: dict
+
+
+@app.get("/api/check-repo", response_model=CheckRepoResponse)
+async def check_repo(repo: str) -> CheckRepoResponse:
+    """Verify the GitHub token can access the given repo.
+
+    Usage: ``GET /api/check-repo?repo=goalz-cons/my-project``
+    """
+    gh = _get_github()
+    try:
+        info = gh.check_repo_access(repo)
+        return CheckRepoResponse(**info)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Cannot access repo: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
 # POST /api/push-code – direct API trigger
 # ---------------------------------------------------------------------------
 @app.post("/api/push-code", response_model=PushCodeResponse)
@@ -108,6 +134,7 @@ async def push_code(body: PushCodeRequest) -> PushCodeResponse:
             task_id=body.task_id,
             override_repo=body.github_repo,
             override_branch=body.github_branch,
+            override_base_branch=body.base_branch,
             override_files=body.files,
             override_commit_msg=body.commit_message,
             override_create_pr=body.create_pr,
@@ -127,6 +154,7 @@ async def push_code(body: PushCodeRequest) -> PushCodeResponse:
     return _commit_and_maybe_pr(
         repo=body.github_repo,
         branch=body.github_branch,
+        base_branch=body.base_branch,
         files=body.files,
         commit_message=body.commit_message or "Code push via API",
         create_pr=body.create_pr,
@@ -142,6 +170,7 @@ async def _process_task(
     *,
     override_repo: str | None = None,
     override_branch: str | None = None,
+    override_base_branch: str | None = None,
     override_files: dict[str, str] | None = None,
     override_commit_msg: str | None = None,
     override_create_pr: bool = False,
@@ -174,6 +203,7 @@ async def _process_task(
     result = _commit_and_maybe_pr(
         repo=repo,
         branch=branch,
+        base_branch=override_base_branch,
         files=files,
         commit_message=commit_message,
         create_pr=create_pr,
@@ -182,6 +212,8 @@ async def _process_task(
 
     # Post a comment back to ClickUp with the result
     comment_parts = [f"Code pushed to `{branch}` — commit [`{result.commit_sha[:8]}`]({result.commit_url})"]
+    if result.branch_created:
+        comment_parts.append(f"Branch `{branch}` was auto-created.")
     if result.pr_url:
         comment_parts.append(f"Pull request: {result.pr_url}")
     try:
@@ -196,6 +228,7 @@ def _commit_and_maybe_pr(
     *,
     repo: str,
     branch: str,
+    base_branch: str | None = None,
     files: dict[str, str],
     commit_message: str,
     create_pr: bool,
@@ -210,6 +243,7 @@ def _commit_and_maybe_pr(
             branch=branch,
             files=files,
             commit_message=commit_message,
+            base_branch=base_branch,
         )
     except Exception as exc:
         logger.exception("GitHub commit failed")
@@ -233,5 +267,6 @@ def _commit_and_maybe_pr(
         commit_sha=commit.sha,
         commit_url=commit.url,
         pr_url=pr_url,
+        branch_created=commit.branch_created,
         message="Code committed successfully",
     )
