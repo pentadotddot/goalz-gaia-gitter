@@ -124,6 +124,38 @@ async def check_repo(repo: str) -> CheckRepoResponse:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/debug-task – inspect raw ClickUp task description
+# ---------------------------------------------------------------------------
+@app.get("/api/debug-task")
+async def debug_task(task_id: str = Query(..., description="ClickUp task ID")):
+    """Fetch a ClickUp task and return its raw description for debugging.
+
+    Usage: ``GET /api/debug-task?task_id=86c8cnafn``
+    """
+    clickup = _get_clickup()
+    try:
+        task = await clickup.get_task(task_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Cannot fetch task: {exc}") from exc
+
+    json_payload = parse_json_payload(task.description)
+    return {
+        "task_id": task.task_id,
+        "task_name": task.task_name,
+        "description_raw": task.description,
+        "description_length": len(task.description),
+        "json_payload_found": json_payload is not None,
+        "json_payload": json_payload,
+        "custom_fields": {
+            "github_repo": task.github_repo,
+            "github_branch": task.github_branch,
+            "create_pr": task.create_pr,
+            "pr_target_branch": task.pr_target_branch,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # POST /api/push-code – direct API trigger / ClickUp automation webhook
 # ---------------------------------------------------------------------------
 @app.post("/api/push-code", response_model=PushCodeResponse)
