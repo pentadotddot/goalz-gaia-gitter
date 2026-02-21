@@ -58,14 +58,59 @@ def _extract_raw_json(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _normalize_files(files: Any) -> dict[str, str] | None:
+    """Accept *files* as either a dict or an array-of-objects and return a dict.
+
+    Supported formats:
+    - ``{"path": "content", ...}``  (dict – original format)
+    - ``[{"path": "...", "content": "..."}, ...]``  (array – superagent format)
+
+    Returns ``None`` if the format is unrecognised.
+    """
+    if isinstance(files, dict):
+        return files
+
+    if isinstance(files, list):
+        result: dict[str, str] = {}
+        for entry in files:
+            if isinstance(entry, dict) and "path" in entry and "content" in entry:
+                result[entry["path"]] = entry["content"]
+            else:
+                logger.warning("Skipping invalid files array entry: %s", entry)
+        if result:
+            return result
+
+    return None
+
+
+def _unescape_file_contents(files: dict[str, str]) -> dict[str, str]:
+    """Replace literal ``\\n`` and ``\\t`` sequences with real whitespace."""
+    out: dict[str, str] = {}
+    for path, content in files.items():
+        # Only unescape if the content has literal \n but no real newlines
+        # (indicates double-escaping by the superagent)
+        if "\\n" in content and "\n" not in content:
+            content = content.replace("\\n", "\n").replace("\\t", "\t")
+        out[path] = content
+    return out
+
+
 def _validate_payload(data: dict[str, Any]) -> dict[str, Any] | None:
     """Return *data* if it looks like a valid code-push payload, else None."""
     if not isinstance(data, dict):
         logger.warning("JSON payload is not a dict – ignoring")
         return None
-    if "files" not in data or not isinstance(data["files"], dict):
-        logger.warning("JSON payload has no valid 'files' dict – ignoring")
+    if "files" not in data:
+        logger.warning("JSON payload has no 'files' field – ignoring")
         return None
+
+    normalized = _normalize_files(data["files"])
+    if normalized is None:
+        logger.warning("JSON payload 'files' is neither a dict nor a valid array – ignoring")
+        return None
+
+    # Unescape double-escaped content and store back as a dict
+    data["files"] = _unescape_file_contents(normalized)
     return data
 
 
