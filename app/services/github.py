@@ -49,36 +49,6 @@ class GitHubService:
         }
 
     # ------------------------------------------------------------------
-    # Ensure a branch exists (create from base if not)
-    # ------------------------------------------------------------------
-    def ensure_branch(
-        self, repo_full_name: str, branch: str, base_branch: str | None = None
-    ) -> bool:
-        """Make sure *branch* exists. Create it from *base_branch* if not.
-
-        Returns True if a new branch was created, False if it already existed.
-        """
-        repo = self._gh.get_repo(repo_full_name)
-        try:
-            repo.get_git_ref(f"heads/{branch}")
-            return False  # already exists
-        except GithubException as exc:
-            if exc.status != 404:
-                raise
-
-        # Branch does not exist – create from base
-        source = base_branch or repo.default_branch
-        base_ref = repo.get_git_ref(f"heads/{source}")
-        repo.create_git_ref(
-            ref=f"refs/heads/{branch}",
-            sha=base_ref.object.sha,
-        )
-        logger.info(
-            "Created branch %s from %s on %s", branch, source, repo_full_name
-        )
-        return True
-
-    # ------------------------------------------------------------------
     # Core: commit a set of files onto a branch
     # ------------------------------------------------------------------
     def commit_files(
@@ -111,13 +81,32 @@ class GitHubService:
         CommitResult with the new commit SHA, URL, and whether the branch
         was freshly created.
         """
-        # Auto-create branch if needed
-        branch_created = self.ensure_branch(repo_full_name, branch, base_branch)
-
         repo = self._gh.get_repo(repo_full_name)
 
+        # --- Ensure branch exists (create from base if needed) -----------
+        branch_created = False
+        try:
+            ref = repo.get_git_ref(f"heads/{branch}")
+        except GithubException as exc:
+            if exc.status != 404:
+                raise
+            # Branch does not exist – create from base
+            source = base_branch or repo.default_branch
+            base_ref = repo.get_git_ref(f"heads/{source}")
+            repo.create_git_ref(
+                ref=f"refs/heads/{branch}",
+                sha=base_ref.object.sha,
+            )
+            logger.info("Created branch %s from %s on %s", branch, source, repo_full_name)
+            branch_created = True
+            # Re-fetch the newly created ref
+            ref = repo.get_git_ref(f"heads/{branch}")
+
         # 1. Get the SHA of the latest commit on the branch
-        ref = repo.get_git_ref(f"heads/{branch}")
+        if ref.object is None:
+            # Safety: re-fetch if the ref object wasn't populated
+            ref = repo.get_git_ref(f"heads/{branch}")
+
         latest_commit_sha = ref.object.sha
         latest_commit = repo.get_git_commit(latest_commit_sha)
         base_tree = latest_commit.tree
