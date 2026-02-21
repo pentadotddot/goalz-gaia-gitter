@@ -237,6 +237,11 @@ async def _process_task(
     # --- Try JSON payload in description first (preferred) ---------------
     json_payload = parse_json_payload(task.description)
 
+    # Fallback: try the plain description (no markdown escaping from ClickUp)
+    if json_payload is None and task.description_plain and task.description_plain != task.description:
+        logger.info("Retrying JSON parse with plain (non-markdown) description")
+        json_payload = parse_json_payload(task.description_plain)
+
     if json_payload:
         logger.info("Found JSON payload in task %s description", task_id)
         # JSON payload values, with overrides and custom fields as fallbacks

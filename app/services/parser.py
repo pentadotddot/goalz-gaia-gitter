@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 # JSON payload extraction
 # ---------------------------------------------------------------------------
 
-# 1) Fenced ```json ... ``` block.
+# 1) Fenced ``` ... ``` block (any language tag – json, swift, text, etc.)
 _JSON_BLOCK_RE = re.compile(
-    r"```json\s*\n"    # opening fence with json tag
+    r"```\w*\s*\n"     # opening fence with optional language tag
     r"(.*?)"           # captured JSON content (non-greedy)
     r"\n\s*```",        # closing fence
     re.DOTALL,
@@ -34,6 +34,33 @@ _JSON_BLOCK_RE = re.compile(
 #    We use a simple approach: locate the first `{` then try progressively
 #    larger slices until json.loads succeeds.  This handles nested braces
 #    correctly without a complex regex.
+
+
+def _try_json_loads(text: str) -> dict[str, Any] | None:
+    """Try ``json.loads`` on *text*.
+
+    If it fails, halve backslashes (ClickUp's markdown description doubles
+    them) and retry.  Returns the parsed dict or ``None``.
+    """
+    # Attempt 1: as-is
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Attempt 2: undo ClickUp's backslash doubling
+    fixed = text.replace("\\\\", "\\")
+    try:
+        data = json.loads(fixed)
+        if isinstance(data, dict):
+            logger.info("JSON parsed after halving backslashes (ClickUp markdown escaping)")
+            return data
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    return None
 
 
 def _extract_raw_json(text: str) -> dict[str, Any] | None:
@@ -48,14 +75,7 @@ def _extract_raw_json(text: str) -> dict[str, Any] | None:
         return None
 
     candidate = text[start : end + 1]
-    try:
-        data = json.loads(candidate)
-        if isinstance(data, dict):
-            return data
-    except json.JSONDecodeError:
-        pass
-
-    return None
+    return _try_json_loads(candidate)
 
 
 def _normalize_files(files: Any) -> dict[str, str] | None:
@@ -124,14 +144,13 @@ def parse_json_payload(description: str) -> dict[str, Any] | None:
     ``github_branch``, ``base_branch``, ``files``, ``commit_message``,
     ``create_pr``, ``pr_target_branch``).
     """
-    # --- Attempt 1: fenced ```json ... ``` block -------------------------
+    # --- Attempt 1: fenced ``` ... ``` block (any language tag) -----------
     match = _JSON_BLOCK_RE.search(description)
     if match:
         raw = match.group(1).strip()
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning("Found a ```json block but it is not valid JSON")
+        data = _try_json_loads(raw)
+        if data is None:
+            logger.warning("Found a fenced code block but could not parse as JSON")
         else:
             result = _validate_payload(data)
             if result is not None:

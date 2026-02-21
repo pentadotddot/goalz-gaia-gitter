@@ -24,6 +24,7 @@ class TaskInfo:
     task_id: str
     task_name: str
     description: str
+    description_plain: str = ""
     github_repo: str | None = None
     github_branch: str | None = None
     create_pr: bool = False
@@ -73,6 +74,7 @@ class ClickUpClient:
             task_id=data["id"],
             task_name=data.get("name", ""),
             description=data.get("markdown_description") or data.get("description", ""),
+            description_plain=data.get("description", ""),
             github_repo=custom.get("github_repo"),
             github_branch=custom.get("github_branch"),
             create_pr=custom.get("create_pr", False),
